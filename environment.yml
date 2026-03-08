@@ -1,0 +1,8 @@
+name: jd-playwright
+channels:
+  - defaults
+dependencies:
+  - python>=3.10
+  - pip
+  - pip:
+    - playwright>=1.40.0
