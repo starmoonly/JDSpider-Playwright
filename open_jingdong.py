@@ -1,6 +1,8 @@
 """
 Open browser and go to 京东 (JD.com) website.
-- 打开页面后请用手机扫码登录，每一步操作前都会在终端暂停，你按回车后再继续。
+- 支持两种运行模式：
+  - debug: 每一步操作前都会在终端暂停，按回车后继续
+  - normal: 自动连续执行，不需要按回车
 - 支持在首页搜索框输入关键词并点击搜索；可读取当前页商品信息并保存为 JSON。
 用法: python open_jingdong.py [关键词]
   例如: python open_jingdong.py 手机
@@ -17,17 +19,70 @@ from playwright.async_api import async_playwright
 
 # 脚本所在目录，用于保存文件（避免因运行目录不同而保存到别处）
 SCRIPT_DIR = Path(__file__).resolve().parent
+CONFIG_PATH = SCRIPT_DIR / "crawler_config.json"
 # 专门存放页面源码的文件夹
 PAGE_SOURCES_DIR = SCRIPT_DIR / "page_sources"
 # 登录状态文件（cookies + storage），携带后下次可免扫码
 JD_STORAGE_STATE_PATH = SCRIPT_DIR / "jd_storage_state.json"
 PRODUCT_DETAILS_DIR = SCRIPT_DIR / "product_details"
-MAX_COMMENT_PAGES = 3
-COMMENT_PAGE_SIZE = 10
-DETAIL_BATCH_SIZE = 2
-DETAIL_OPEN_INTERVAL_SECONDS = 8
-DETAIL_PAGE_SETTLE_SECONDS = 4
-DETAIL_BATCH_PAUSE_SECONDS = 6
+
+DEFAULT_CONFIG = {
+    "run_mode": "normal",
+    "search": {
+        "default_keyword": "西安大雁塔",
+    },
+    "comments": {
+        "max_pages": 3,
+        "page_size": 10,
+    },
+    "detail_scraping": {
+        "batch_size": 2,
+        "open_interval_seconds": 8,
+        "page_settle_seconds": 4,
+        "batch_pause_seconds": 6,
+    },
+    "login": {
+        "default_scan_wait_seconds": 15,
+    },
+}
+
+
+def merge_config(base: dict, override: dict) -> dict:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            merged[key] = merge_config(base[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_config() -> dict:
+    if not CONFIG_PATH.exists():
+        return DEFAULT_CONFIG
+
+    try:
+        raw = CONFIG_PATH.read_text(encoding="utf-8").strip()
+        if not raw:
+            return DEFAULT_CONFIG
+        loaded = json.loads(raw)
+        if not isinstance(loaded, dict):
+            return DEFAULT_CONFIG
+        return merge_config(DEFAULT_CONFIG, loaded)
+    except Exception:
+        return DEFAULT_CONFIG
+
+
+APP_CONFIG = load_config()
+MAX_COMMENT_PAGES = APP_CONFIG["comments"]["max_pages"]
+COMMENT_PAGE_SIZE = APP_CONFIG["comments"]["page_size"]
+DETAIL_BATCH_SIZE = APP_CONFIG["detail_scraping"]["batch_size"]
+DETAIL_OPEN_INTERVAL_SECONDS = APP_CONFIG["detail_scraping"]["open_interval_seconds"]
+DETAIL_PAGE_SETTLE_SECONDS = APP_CONFIG["detail_scraping"]["page_settle_seconds"]
+DETAIL_BATCH_PAUSE_SECONDS = APP_CONFIG["detail_scraping"]["batch_pause_seconds"]
+DEFAULT_SCAN_WAIT_SECONDS = APP_CONFIG["login"]["default_scan_wait_seconds"]
+DEFAULT_RUN_MODE = APP_CONFIG["run_mode"]
+DEFAULT_KEYWORD = APP_CONFIG["search"]["default_keyword"]
 
 
 def get_valid_storage_state_path() -> str | None:
@@ -43,6 +98,34 @@ def get_valid_storage_state_path() -> str | None:
         return str(JD_STORAGE_STATE_PATH)
     except Exception:
         return None
+
+
+def parse_cli_args(argv: list[str]) -> tuple[str, str]:
+    """Parse CLI args and return (mode, keyword)."""
+    mode = DEFAULT_RUN_MODE
+    parts: list[str] = []
+
+    for arg in argv:
+        if arg == "--debug":
+            mode = "debug"
+        elif arg == "--normal":
+            mode = "normal"
+        else:
+            parts.append(arg)
+
+    keyword = " ".join(parts).strip() or DEFAULT_KEYWORD
+    return mode, keyword
+
+
+async def pause_or_continue(debug: bool, message: str, auto_wait_seconds: int = 0):
+    """Pause in debug mode; auto-continue in normal mode."""
+    if debug:
+        input(message)
+        return
+
+    print(message.replace("按回车后", "自动继续：").replace("完成后在终端按回车继续", ""))
+    if auto_wait_seconds > 0:
+        await asyncio.sleep(auto_wait_seconds)
 
 
 def make_html_viewable(html: str, base_url: str = "https://www.jingdong.com/") -> str:
@@ -419,7 +502,8 @@ async def scrape_product_detail(context, product: dict, index: int, total: int, 
         await page.close()
 
 
-async def open_jingdong(keyword: str | None = None):
+async def open_jingdong(keyword: str | None = None, mode: str = "normal"):
+    debug = mode == "debug"
     async with async_playwright() as p:
         # Launch system Edge browser (use headless=False to see the browser)
         # --start-maximized: 启动时窗口最大化
@@ -448,8 +532,13 @@ async def open_jingdong(keyword: str | None = None):
         await page.wait_for_load_state("domcontentloaded")
         await asyncio.sleep(2)
 
-        # Step 1: 若无登录状态或需重新登录，请扫码后按回车；若已登录可直接按回车
-        input("请用手机扫码登录（若已登录可直接按回车），完成后在终端按回车继续... ")
+        # Step 1: debug 模式暂停等待回车；normal 模式自动继续
+        scan_wait_seconds = 0 if storage_state else DEFAULT_SCAN_WAIT_SECONDS
+        await pause_or_continue(
+            debug,
+            "请用手机扫码登录（若已登录可直接按回车），完成后在终端按回车继续... ",
+            auto_wait_seconds=scan_wait_seconds,
+        )
         # 保存当前登录状态，下次启动将自动携带 cookie 免扫码
         await context.storage_state(path=str(JD_STORAGE_STATE_PATH))
         print("已保存登录状态到 jd_storage_state.json，下次运行将自动携带。")
@@ -465,7 +554,7 @@ async def open_jingdong(keyword: str | None = None):
 
         # Step 2: 按回车后再执行搜索
         if keyword and keyword.strip():
-            input(f"按回车后将搜索关键词「{keyword.strip()}」... ")
+            await pause_or_continue(debug, f"按回车后将搜索关键词「{keyword.strip()}」... ")
             search_input = page.locator("#key")
             await search_input.wait_for(state="visible", timeout=10000)
             await search_input.fill(keyword.strip())
@@ -475,7 +564,7 @@ async def open_jingdong(keyword: str | None = None):
             print(f"已搜索: {keyword.strip()}，当前检测到 {len(products)} 条商品数据")
 
         # Step 3: 按回车后再保存页面源码并提取商品信息为 JSON
-        input("按回车后保存当前页面源码并提取商品信息为 JSON... ")
+        await pause_or_continue(debug, "按回车后保存当前页面源码并提取商品信息为 JSON... ")
         # 转存前再次确认商品数据已到达页面；如果还没到，继续等待一段时间
         products = await wait_for_products_loaded(page, timeout_seconds=20)
         await page.evaluate("window.scrollTo(0, 0)")
@@ -502,7 +591,7 @@ async def open_jingdong(keyword: str | None = None):
             print(f"提取商品信息失败: {e}")
 
         # Step 4: 按回车后分组打开商品详情页并下载基础信息、图片和评论
-        input("按回车后分组打开商品详情页并下载基础信息、图片和评论... ")
+        await pause_or_continue(debug, "按回车后分组打开商品详情页并下载基础信息、图片和评论... ")
         PRODUCT_DETAILS_DIR.mkdir(exist_ok=True)
         for batch_start in range(0, len(products), DETAIL_BATCH_SIZE):
             batch = products[batch_start : batch_start + DETAIL_BATCH_SIZE]
@@ -524,13 +613,10 @@ async def open_jingdong(keyword: str | None = None):
             await asyncio.sleep(DETAIL_BATCH_PAUSE_SECONDS)
 
         # Step 5: 按回车后关闭浏览器
-        input("按回车关闭浏览器... ")
+        await pause_or_continue(debug, "按回车关闭浏览器... ")
         await browser.close()
 
 
-# 默认搜索关键词（不传命令行参数时直接使用）
-DEFAULT_KEYWORD = "西安交通大学"
-
 if __name__ == "__main__":
-    kw = " ".join(sys.argv[1:]).strip() if len(sys.argv) > 1 else DEFAULT_KEYWORD
-    asyncio.run(open_jingdong(keyword=kw))
+    run_mode, kw = parse_cli_args(sys.argv[1:])
+    asyncio.run(open_jingdong(keyword=kw, mode=run_mode))

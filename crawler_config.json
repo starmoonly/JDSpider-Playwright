@@ -1,0 +1,19 @@
+{
+  "run_mode": "normal",
+  "search": {
+    "default_keyword": "西安大雁塔"
+  },
+  "comments": {
+    "max_pages": 3,
+    "page_size": 10
+  },
+  "detail_scraping": {
+    "batch_size": 2,
+    "open_interval_seconds": 8,
+    "page_settle_seconds": 4,
+    "batch_pause_seconds": 6
+  },
+  "login": {
+    "default_scan_wait_seconds": 15
+  }
+}
