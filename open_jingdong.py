@@ -558,8 +558,20 @@ async def open_jingdong(keyword: str | None = None, mode: str = "normal"):
             search_input = page.locator("#key")
             await search_input.wait_for(state="visible", timeout=10000)
             await search_input.fill(keyword.strip())
-            await page.locator("button.button:has-text('搜索')").click()
+            # 直接对顶部搜索框按回车，比点击页面上的“搜索”按钮更稳，
+            # 可避免误点到首页其它可点击商品/广告区域。
+            await search_input.press("Enter")
             await page.wait_for_load_state("domcontentloaded")
+            try:
+                await page.wait_for_url(re.compile(r"https?://search\.jd\.com/"), timeout=15000)
+            except Exception:
+                # 兜底：若回车没有触发搜索，再点击搜索栏容器内的按钮
+                search_button = page.locator("#search button.button, .search-m button.button").first
+                await search_button.click(timeout=5000)
+                await page.wait_for_load_state("domcontentloaded")
+                await page.wait_for_url(re.compile(r"https?://search\.jd\.com/"), timeout=15000)
+            if not re.match(r"https?://search\.jd\.com/", page.url):
+                raise RuntimeError(f"搜索后未进入搜索结果页，当前页面为: {page.url}")
             products = await wait_for_products_loaded(page, timeout_seconds=30)
             print(f"已搜索: {keyword.strip()}，当前检测到 {len(products)} 条商品数据")
 
