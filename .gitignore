@@ -10,6 +10,9 @@ env/
 # Saved page HTML (can be large)
 page_sources/*.html
 
+# JD login state (cookies), do not commit
+jd_storage_state.json
+
 # IDE / OS
 .idea/
 .vscode/
