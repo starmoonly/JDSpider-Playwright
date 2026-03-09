@@ -341,6 +341,22 @@ EXTRACT_PRODUCT_DETAIL_JS = """
 () => {
   const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
   const unique = (items) => [...new Set(items.filter(Boolean))];
+  const toAbs = (url) => url && url.startsWith('//') ? `https:${url}` : (url || '');
+  const getImgUrl = (img) => {
+    if (!img) return '';
+    return toAbs(
+      img.getAttribute('data-origin') ||
+      img.getAttribute('data-url') ||
+      img.getAttribute('data-src') ||
+      img.currentSrc ||
+      img.src ||
+      ''
+    );
+  };
+  const pickImages = (selector) =>
+    Array.from(document.querySelectorAll(selector))
+      .map(getImgUrl)
+      .filter(Boolean);
 
   const title = clean(
     document.querySelector('.sku-name')?.textContent ||
@@ -362,12 +378,15 @@ EXTRACT_PRODUCT_DETAIL_JS = """
     ''
   );
 
-  const images = unique(
-    Array.from(document.querySelectorAll('#spec-list img, .spec-items img, #spec-img, img[data-origin], img[data-url], img[src]'))
-      .map((img) => img.getAttribute('data-origin') || img.getAttribute('data-url') || img.currentSrc || img.src || '')
-      .map((url) => url.startsWith('//') ? `https:${url}` : url)
-      .filter((url) => /360buyimg|jd|jfs/i.test(url))
-  );
+  // 只抓商品轮播图/主图，避免把推荐区、店铺图标、标签图抓进来
+  let images = unique(pickImages('.preview-wrap #main-image .image-carousel-track .item img'));
+  if (images.length === 0) {
+    images = unique(pickImages('.preview-wrap #main-image img'));
+  }
+  if (images.length === 0) {
+    images = unique(pickImages('#spec-list img, .spec-items img, #spec-img'));
+  }
+  images = images.filter((url) => /360buyimg|jd|jfs/i.test(url));
 
   const basicInfo = {};
   document.querySelectorAll('#parameter2 li, ul.parameter2 li, .parameter2 li').forEach((li) => {
@@ -453,9 +472,15 @@ async def scrape_product_detail(context, product: dict, index: int, total: int, 
         detail = await page.evaluate(EXTRACT_PRODUCT_DETAIL_JS)
         html = await page.content()
         (product_dir / "detail.html").write_text(html, encoding="utf-8")
+        detail_viewable_html = make_html_viewable(html, base_url=page.url)
+        (product_dir / "detail_viewable.html").write_text(detail_viewable_html, encoding="utf-8")
         if index == 1:
             PAGE_SOURCES_DIR.mkdir(exist_ok=True)
             (PAGE_SOURCES_DIR / "first_product_detail.html").write_text(html, encoding="utf-8")
+            (PAGE_SOURCES_DIR / "first_product_detail_viewable.html").write_text(
+                detail_viewable_html,
+                encoding="utf-8",
+            )
 
         detail_record = {
             "sku": sku,
