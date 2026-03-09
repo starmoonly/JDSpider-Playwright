@@ -7,8 +7,9 @@ venv/
 .venv/
 env/
 
-# Saved page HTML (can be large)
-page_sources/*.html
+# Scraped output data
+page_sources/
+product_details/
 
 # JD login state (cookies), do not commit
 jd_storage_state.json
