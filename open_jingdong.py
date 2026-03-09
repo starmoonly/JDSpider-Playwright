@@ -40,6 +40,7 @@ DEFAULT_CONFIG = {
         "open_interval_seconds": 8,
         "page_settle_seconds": 4,
         "batch_pause_seconds": 6,
+        "save_detail_html_mode": "first_only",
     },
     "login": {
         "default_scan_wait_seconds": 15,
@@ -80,6 +81,7 @@ DETAIL_BATCH_SIZE = APP_CONFIG["detail_scraping"]["batch_size"]
 DETAIL_OPEN_INTERVAL_SECONDS = APP_CONFIG["detail_scraping"]["open_interval_seconds"]
 DETAIL_PAGE_SETTLE_SECONDS = APP_CONFIG["detail_scraping"]["page_settle_seconds"]
 DETAIL_BATCH_PAUSE_SECONDS = APP_CONFIG["detail_scraping"]["batch_pause_seconds"]
+SAVE_DETAIL_HTML_MODE = APP_CONFIG["detail_scraping"]["save_detail_html_mode"]
 DEFAULT_SCAN_WAIT_SECONDS = APP_CONFIG["login"]["default_scan_wait_seconds"]
 DEFAULT_RUN_MODE = APP_CONFIG["run_mode"]
 DEFAULT_KEYWORD = APP_CONFIG["search"]["default_keyword"]
@@ -159,6 +161,14 @@ def normalize_url(url: str) -> str:
     if url.startswith("//"):
         return f"https:{url}"
     return url
+
+
+def should_save_detail_html(index: int) -> bool:
+    if SAVE_DETAIL_HTML_MODE == "all":
+        return True
+    if SAVE_DETAIL_HTML_MODE == "none":
+        return False
+    return index == 1
 
 
 def download_binary(url: str, output_path: Path, referer: str | None = None) -> bool:
@@ -471,10 +481,12 @@ async def scrape_product_detail(context, product: dict, index: int, total: int, 
 
         detail = await page.evaluate(EXTRACT_PRODUCT_DETAIL_JS)
         html = await page.content()
-        (product_dir / "detail.html").write_text(html, encoding="utf-8")
-        detail_viewable_html = make_html_viewable(html, base_url=page.url)
-        (product_dir / "detail_viewable.html").write_text(detail_viewable_html, encoding="utf-8")
+        if should_save_detail_html(index):
+            (product_dir / "detail.html").write_text(html, encoding="utf-8")
+            detail_viewable_html = make_html_viewable(html, base_url=page.url)
+            (product_dir / "detail_viewable.html").write_text(detail_viewable_html, encoding="utf-8")
         if index == 1:
+            detail_viewable_html = make_html_viewable(html, base_url=page.url)
             PAGE_SOURCES_DIR.mkdir(exist_ok=True)
             (PAGE_SOURCES_DIR / "first_product_detail.html").write_text(html, encoding="utf-8")
             (PAGE_SOURCES_DIR / "first_product_detail_viewable.html").write_text(

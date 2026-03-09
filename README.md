@@ -72,7 +72,8 @@ pip install -r requirements.txt
     "batch_size": 2,
     "open_interval_seconds": 8,
     "page_settle_seconds": 4,
-    "batch_pause_seconds": 6
+    "batch_pause_seconds": 6,
+    "save_detail_html_mode": "first_only"
   },
   "login": {
     "default_scan_wait_seconds": 15
@@ -99,6 +100,11 @@ pip install -r requirements.txt
   - 商品详情页打开后额外等待多久再开始提取
 - `detail_scraping.batch_pause_seconds`
   - 每一批之间暂停多久
+- `detail_scraping.save_detail_html_mode`
+  - 控制商品详情页 HTML 的保存策略
+  - `first_only`：只保存第一个商品的详情页 HTML
+  - `all`：保存所有商品的详情页 HTML
+  - `none`：不保存任何商品详情页 HTML
 - `login.default_scan_wait_seconds`
   - `normal` 模式下，如果没有有效登录态，默认给多少秒扫码时间
 
@@ -152,6 +158,7 @@ python open_jingdong.py --debug "西安交通大学"
 product_details/
   001_<sku>_<title>/
     detail.html
+    detail_viewable.html
     product.json
     comments.json
     comments_error.txt
@@ -163,11 +170,26 @@ product_details/
 
 其中：
 
-- `detail.html`：商品详情页源码
+- `detail.html`：商品详情页原始源码
+- `detail_viewable.html`：适合直接在浏览器中打开的可浏览版 HTML
 - `product.json`：商品基础信息与详情信息
 - `comments.json`：评论数据
 - `comments_error.txt`：评论抓取失败时的错误信息
 - `images/`：下载的商品图片
+
+### 详情页 HTML 保存策略
+
+详情页 HTML 是否保存由 `crawler_config.json` 中的 `detail_scraping.save_detail_html_mode` 控制：
+
+- `first_only`
+  - 只保存第一个商品的 `detail.html` 和 `detail_viewable.html`
+  - 第二个及后续商品不保存详情页 HTML
+- `all`
+  - 所有商品都保存详情页 HTML
+- `none`
+  - 所有商品都不保存详情页 HTML
+
+默认值为 `first_only`，这样可以减少磁盘占用，同时保留一个可用于调试和结构分析的详情页样本。
 
 ## 登录态说明
 

@@ -11,7 +11,8 @@
     "batch_size": 2,
     "open_interval_seconds": 8,
     "page_settle_seconds": 4,
-    "batch_pause_seconds": 6
+    "batch_pause_seconds": 6,
+    "save_detail_html_mode": "first_only"
   },
   "login": {
     "default_scan_wait_seconds": 15
