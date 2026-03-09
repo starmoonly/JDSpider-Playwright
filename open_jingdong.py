@@ -4,12 +4,13 @@ Open browser and go to 京东 (JD.com) website.
 - 支持在首页搜索框输入关键词并点击搜索；可读取当前页商品信息并保存为 JSON。
 用法: python open_jingdong.py [关键词]
   例如: python open_jingdong.py 手机
-  不传关键词则使用默认「王者荣耀」。
 """
 import asyncio
 import json
 import re
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from playwright.async_api import async_playwright
@@ -20,6 +21,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PAGE_SOURCES_DIR = SCRIPT_DIR / "page_sources"
 # 登录状态文件（cookies + storage），携带后下次可免扫码
 JD_STORAGE_STATE_PATH = SCRIPT_DIR / "jd_storage_state.json"
+PRODUCT_DETAILS_DIR = SCRIPT_DIR / "product_details"
+MAX_COMMENT_PAGES = 3
+COMMENT_PAGE_SIZE = 10
+DETAIL_BATCH_SIZE = 2
+DETAIL_OPEN_INTERVAL_SECONDS = 8
+DETAIL_PAGE_SETTLE_SECONDS = 4
+DETAIL_BATCH_PAUSE_SECONDS = 6
 
 
 def get_valid_storage_state_path() -> str | None:
@@ -52,6 +60,121 @@ def make_html_viewable(html: str, base_url: str = "https://www.jingdong.com/") -
     # 移除所有 script 标签，避免在 file:// 下执行导致卡死
     html = re.sub(r"<script\b[^>]*>[\s\S]*?</script>", "", html, flags=re.I)
     return html
+
+
+def sanitize_filename(name: str, max_length: int = 80) -> str:
+    cleaned = re.sub(r"[\x00-\x1f]+", " ", name)
+    cleaned = re.sub(r'[\\/:*?"<>|]+', "_", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = cleaned[:max_length].rstrip(" .")
+    return cleaned or "item"
+
+
+def normalize_url(url: str) -> str:
+    if not url:
+        return ""
+    if url.startswith("//"):
+        return f"https:{url}"
+    return url
+
+
+def download_binary(url: str, output_path: Path, referer: str | None = None) -> bool:
+    url = normalize_url(url)
+    if not url:
+        return False
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Referer": referer or "https://www.jd.com/",
+    }
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        output_path.write_bytes(resp.read())
+    return True
+
+
+def parse_jsonp(text: str) -> dict:
+    text = text.strip()
+    match = re.match(r"^[^(]+\((.*)\)\s*;?\s*$", text, re.S)
+    payload = match.group(1) if match else text
+    return json.loads(payload)
+
+
+def fetch_comments_for_sku(sku: str, referer: str, max_pages: int = MAX_COMMENT_PAGES, page_size: int = COMMENT_PAGE_SIZE) -> dict:
+    comments = []
+    summary = {}
+    endpoint = "https://club.jd.com/comment/productPageComments.action"
+
+    for page in range(max_pages):
+        params = {
+            "callback": f"fetchJSON_comment98_page{page}",
+            "productId": sku,
+            "score": 0,
+            "sortType": 5,
+            "page": page,
+            "pageSize": page_size,
+            "isShadowSku": 0,
+            "fold": 1,
+        }
+        url = f"{endpoint}?{urllib.parse.urlencode(params)}"
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Referer": referer,
+        }
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            text = resp.read().decode("utf-8", errors="ignore")
+
+        data = parse_jsonp(text)
+        if not isinstance(data, dict):
+            break
+
+        if not summary:
+            summary = {
+                "maxPage": data.get("maxPage"),
+                "hotCommentTagStatistics": data.get("hotCommentTagStatistics", []),
+                "productCommentSummary": data.get("productCommentSummary", {}),
+            }
+
+        page_comments = data.get("comments") or []
+        if not page_comments:
+            break
+
+        for comment in page_comments:
+            comments.append(
+                {
+                    "id": comment.get("id"),
+                    "nickname": comment.get("nickname"),
+                    "score": comment.get("score"),
+                    "content": comment.get("content"),
+                    "creationTime": comment.get("creationTime"),
+                    "usefulVoteCount": comment.get("usefulVoteCount"),
+                    "replyCount": comment.get("replyCount"),
+                    "productColor": comment.get("productColor"),
+                    "productSize": comment.get("productSize"),
+                }
+            )
+
+        max_page = data.get("maxPage")
+        if isinstance(max_page, int) and max_page > 0 and page + 1 >= max_page:
+            break
+
+    return {
+        "sku": sku,
+        "page_size": page_size,
+        "fetched_pages": min(max_pages, len(comments) // page_size + (1 if len(comments) % page_size else 0)),
+        "comments_count": len(comments),
+        "summary": summary,
+        "comments": comments,
+    }
 
 
 # 在页面内执行的 JS：从搜索结果/商品列表页提取商品信息（兼容旧版 gl-item 与新版结构）
@@ -131,6 +254,66 @@ EXTRACT_PRODUCTS_JS = """
 """
 
 
+EXTRACT_PRODUCT_DETAIL_JS = """
+() => {
+  const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+  const unique = (items) => [...new Set(items.filter(Boolean))];
+
+  const title = clean(
+    document.querySelector('.sku-name')?.textContent ||
+    document.querySelector('[class*="sku-name"]')?.textContent ||
+    document.title
+  );
+
+  const priceText = clean(
+    document.querySelector('.p-price .price')?.textContent ||
+    document.querySelector('[class*="price"]')?.textContent ||
+    ''
+  );
+  const priceMatch = priceText.match(/\\d+(?:\\.\\d+)?/);
+
+  const shop = clean(
+    document.querySelector('.name-goodshop')?.textContent ||
+    document.querySelector('[class*="shop"] [class*="name"]')?.textContent ||
+    document.querySelector('[class*="store"]')?.textContent ||
+    ''
+  );
+
+  const images = unique(
+    Array.from(document.querySelectorAll('#spec-list img, .spec-items img, #spec-img, img[data-origin], img[data-url], img[src]'))
+      .map((img) => img.getAttribute('data-origin') || img.getAttribute('data-url') || img.currentSrc || img.src || '')
+      .map((url) => url.startsWith('//') ? `https:${url}` : url)
+      .filter((url) => /360buyimg|jd|jfs/i.test(url))
+  );
+
+  const basicInfo = {};
+  document.querySelectorAll('#parameter2 li, ul.parameter2 li, .parameter2 li').forEach((li) => {
+    const text = clean(li.textContent);
+    const parts = text.split('：');
+    if (parts.length >= 2) {
+      basicInfo[parts[0]] = parts.slice(1).join('：');
+    }
+  });
+
+  document.querySelectorAll('.Ptable-item dl, .Ptable dl').forEach((dl) => {
+    const key = clean(dl.querySelector('dt')?.textContent);
+    const value = clean(dl.querySelector('dd')?.textContent);
+    if (key && value) {
+      basicInfo[key] = value;
+    }
+  });
+
+  return {
+    title,
+    price: priceMatch ? priceMatch[0] : '',
+    shop,
+    images,
+    basic_info: basicInfo
+  };
+}
+"""
+
+
 async def wait_for_products_loaded(page, timeout_seconds: int = 30, min_count: int = 1):
     """等待商品数据真正出现在页面上，再继续后续转存。"""
     selector = '[data-sku], a[href*="item.jd.com"], a[href*="item.m.jd.com"], .gl-item'
@@ -157,6 +340,83 @@ async def wait_for_products_loaded(page, timeout_seconds: int = 30, min_count: i
 
     await page.evaluate("window.scrollTo(0, 0)")
     return last_products
+
+
+async def scrape_product_detail(context, product: dict, index: int, total: int, open_delay: float = 0):
+    sku = str(product.get("sku") or "").strip()
+    if not sku:
+        return
+
+    if open_delay > 0:
+        await asyncio.sleep(open_delay)
+
+    product_dir = PRODUCT_DETAILS_DIR / f"{index:03d}_{sku}_{sanitize_filename(product.get('title', ''), 40)}"
+    images_dir = product_dir / "images"
+    product_dir.mkdir(parents=True, exist_ok=True)
+    images_dir.mkdir(parents=True, exist_ok=True)
+
+    page = await context.new_page()
+    try:
+        print(f"[{index}/{total}] 正在抓取商品详情: {sku}")
+        await page.goto(product.get("link") or f"https://item.jd.com/{sku}.html", wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_load_state("domcontentloaded")
+        await asyncio.sleep(DETAIL_PAGE_SETTLE_SECONDS)
+
+        try:
+            await page.wait_for_selector(".sku-name, #parameter2, .Ptable-item, .p-price", timeout=15000)
+        except Exception:
+            pass
+
+        detail = await page.evaluate(EXTRACT_PRODUCT_DETAIL_JS)
+        html = await page.content()
+        (product_dir / "detail.html").write_text(html, encoding="utf-8")
+        if index == 1:
+            PAGE_SOURCES_DIR.mkdir(exist_ok=True)
+            (PAGE_SOURCES_DIR / "first_product_detail.html").write_text(html, encoding="utf-8")
+
+        detail_record = {
+            "sku": sku,
+            "search_title": product.get("title", ""),
+            "search_price": product.get("price", ""),
+            "search_shop": product.get("shop", ""),
+            "search_image": product.get("image", ""),
+            "link": product.get("link") or page.url,
+            "detail": detail,
+        }
+        (product_dir / "product.json").write_text(
+            json.dumps(detail_record, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        image_urls = detail.get("images") or []
+        for image_index, image_url in enumerate(image_urls, start=1):
+            normalized = normalize_url(image_url)
+            if not normalized:
+                continue
+            ext = Path(urllib.parse.urlparse(normalized).path).suffix or ".jpg"
+            if len(ext) > 6:
+                ext = ".jpg"
+            image_path = images_dir / f"{image_index:02d}{ext}"
+            try:
+                await asyncio.to_thread(download_binary, normalized, image_path, page.url)
+            except Exception:
+                continue
+
+        try:
+            comments = await asyncio.to_thread(fetch_comments_for_sku, sku, page.url)
+            (product_dir / "comments.json").write_text(
+                json.dumps(comments, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            (product_dir / "comments_error.txt").write_text(str(exc), encoding="utf-8")
+
+        print(f"[{index}/{total}] 已保存 {sku} 的详情、图片和评论")
+    except Exception as exc:
+        (product_dir / "error.txt").write_text(str(exc), encoding="utf-8")
+        print(f"[{index}/{total}] 抓取 {sku} 失败: {exc}")
+    finally:
+        await page.close()
 
 
 async def open_jingdong(keyword: str | None = None):
@@ -241,15 +501,36 @@ async def open_jingdong(keyword: str | None = None):
         except Exception as e:
             print(f"提取商品信息失败: {e}")
 
-        # Step 4: 按回车后关闭浏览器
+        # Step 4: 按回车后分组打开商品详情页并下载基础信息、图片和评论
+        input("按回车后分组打开商品详情页并下载基础信息、图片和评论... ")
+        PRODUCT_DETAILS_DIR.mkdir(exist_ok=True)
+        for batch_start in range(0, len(products), DETAIL_BATCH_SIZE):
+            batch = products[batch_start : batch_start + DETAIL_BATCH_SIZE]
+            tasks = []
+            for offset, product in enumerate(batch):
+                index = batch_start + offset + 1
+                tasks.append(
+                    asyncio.create_task(
+                        scrape_product_detail(
+                            context,
+                            product,
+                            index,
+                            len(products),
+                            open_delay=offset * DETAIL_OPEN_INTERVAL_SECONDS,
+                        )
+                    )
+                )
+            await asyncio.gather(*tasks)
+            await asyncio.sleep(DETAIL_BATCH_PAUSE_SECONDS)
+
+        # Step 5: 按回车后关闭浏览器
         input("按回车关闭浏览器... ")
         await browser.close()
 
 
 # 默认搜索关键词（不传命令行参数时直接使用）
-DEFAULT_KEYWORD = "西安大雁塔"
+DEFAULT_KEYWORD = "西安交通大学"
 
 if __name__ == "__main__":
-    # 未传命令行参数则用「王者荣耀」；传了则用传入的关键词，如: python open_jingdong.py 手机
     kw = " ".join(sys.argv[1:]).strip() if len(sys.argv) > 1 else DEFAULT_KEYWORD
     asyncio.run(open_jingdong(keyword=kw))
